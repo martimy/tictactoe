@@ -19,49 +19,101 @@ import os
 import json
 import random
 import string
+import time
 import paho.mqtt.client as mqtt
 
-# MQTT broker configuration
-broker_address = os.getenv('MQTT_BROKER')
-if broker_address is None:
-    broker_address = "localhost"
-print(f"Broker Address: {broker_address}")
-broker_port = 1883
 
-# Generate a random ID for this player
-player_id = ''.join(random.choices(string.digits, k=6))
+PLAYER_X = "X"
+PLAYER_O = "O"
+TIE_GAME = "T"
+GAME_TOPIC = "tic-tac-toe/games"
 
-# Generate a random game ID
-propose_id = ''.join(random.choices(
-    string.ascii_uppercase + string.digits, k=6))
+class MQTTConnetion:
+    def __init__(self, broker, port, gid):
+        self.broker_address = broker
+        self.broker_port = port
+        self.game_topic = f"{GAME_TOPIC}/{gid}"
+        self.player_id = ''.join(random.choices(string.digits, k=6))
+        self.remote_player = None
+        self.client = None
+        self.receive_move = None
 
+    def connet(self):
+        # Create an MQTT client and connect to the broker
+        self.client = mqtt.Client(client_id=self.player_id)
+        self.client.connect(self.broker_address, self.broker_port)
 
-# Create an MQTT client and connect to the broker
-client = mqtt.Client(client_id=player_id)
-client.connect(broker_address, broker_port)
+        # Subscribe to the game topic and start the MQTT loop
+        self.client.subscribe(self.game_topic)
+        self.client.on_message = self.on_message
+        self.client.loop_start()
 
+        # Publish a game-start message to the game topic
+        request_payload = {"type": "game-start", "player_id": self.player_id}
+        self.client.publish(self.game_topic, json.dumps(
+            request_payload), retain=True)
 
-def get_input(message):
-    while True:
-        user_input = input(message)
-        if user_input.isdigit():
-            user_input = int(user_input)
-            if 0 <= user_input <= 2:
-                return user_input
-        print("Invalid input. Please enter a number between 0 and 2.")
+    # Define a callback function to handle incoming messages
+    def on_message(self, client, userdata, message):
+        payload = json.loads(message.payload)
+        if payload["player_id"] == self.player_id:
+            return
+        if payload["type"] == "game-start":
+            self.handle_game_start(payload)
+        elif payload["type"] == "move":
+            self.handle_game_move(payload)
+
+    def handle_game_start(self, payload):
+        self.remote_player = payload["player_id"]
+
+    def handle_game_move(self, payload):
+        # Handle incoming move from the other player
+        self.receive_move( payload['row'] , payload['col'] )
+            
+    def send_move(self, row, col, winner):
+        # Publish move to the game topic
+        move_payload = {"type": "move",
+                        "player_id": self.player_id, "row": row, "col": col,
+                        "winner": winner}
+        self.client.publish(self.game_topic, json.dumps(move_payload))
+
+    def disconnect(self):
+        self.client.publish(self.game_topic, payload=None, retain=True)
+        self.client.disconnect()
+
+    def connected(self):
+        return self.remote_player is not None
+
+    def get_my_symbol(self):
+        return PLAYER_X if self.player_id >= self.remote_player else PLAYER_O
+    
+    def set_receive_move(self, fn):
+        self.receive_move = fn
 
 
 class Game:
-    def __init__(self, gid, pid):
-        self.game_topic = f"tic-tac-toe/games/{gid}"
-        self.player_id = pid
+    def __init__(self, connection):
+        self.connection = connection
+        # self.player_id = pid
         self.board = [['']*3, ['']*3, ['']*3]
-        self.my_turn = False
-        self.my_symbol = ""
         self.winner = None
         self.active = True
+        self.my_symbol = connection.get_my_symbol()
+        self.other_symbol = PLAYER_O if self.my_symbol == PLAYER_X else PLAYER_X
+        self.my_turn = self.my_symbol == PLAYER_X
+        print(f"You are '{self.my_symbol}'.")
+        self.connection.set_receive_move(self.receive_move)
 
-    def test_wining(self):
+    def get_input(self, message):
+        while True:
+            user_input = input(message)
+            if user_input.isdigit():
+                user_input = int(user_input)
+                if 0 <= user_input <= 2:
+                    return user_input
+            print("Invalid input. Please enter a number between 0 and 2.")
+
+    def test_winning(self):
         # Check rows
         for row in self.board:
             if all(cell == row[0] for cell in row):
@@ -84,109 +136,86 @@ class Game:
     def test_tie(self):
         return all(cell != '' for row in self.board for cell in row)
 
-    def valid_move(self, x, y):
+    def is_valid_move(self, x, y):
         return self.board[x][y] == ""
-
-    def handle_game_start(self, payload):
-        # Determine whether this player is X or O
-        if payload["player_id"] > player_id:
-            self.my_symbol = "O"
-            self.my_turn = False
-        else:
-            self.my_symbol = "X"
-            self.my_turn = True
-
-    def handle_game_move(self, payload):
-        # Handle incoming move from the other player
-        print(
-            f"Received move from player {payload['player_id']}: \
-                ({payload['row']}, {payload['col']})")
-        if self.valid_move(payload['row'], payload['col']):
-            self.board[payload['row']][payload['col']
-                                       ] = "O" if self.my_symbol == "X" else "X"
-            self.winner = self.test_wining()
-            if not self.winner:
-                # no winner
-                if self.test_tie():
-                    payload = {"type": "game-end", "player_id": player_id}
-                    client.publish(self.game_topic, json.dumps(payload))
-                    self.handle_game_over()
-                else:
-                    self.my_turn = True
-            else:
-                payload = {"type": "game-end", "player_id": player_id}
-                client.publish(self.game_topic, json.dumps(payload))
-                self.handle_game_over()
-        else:
-            invalid_payload = {"type": "invalid", "player_id": player_id}
-            client.publish(self.game_topic, json.dumps(invalid_payload))
-            self.my_turn = False
-
-    def handle_game_invalid(self):
-        print("Invalid move. Try again")
-        self.my_turn = True
-
-    def handle_game_over(self):
-        client.disconnect()
-        self.active = False
-
-    # Define a callback function to handle incoming messages
-    def on_message(self, client, userdata, message):
-        payload = json.loads(message.payload)
-        if payload["player_id"] == player_id:
-            return
-        if payload["type"] == "game-start":
-            self.handle_game_start(payload)
-        elif payload["type"] == "move":
-            self.handle_game_move(payload)
-        elif payload["type"] == "invalid":
-            self.handle_game_invalid()
-        elif payload["type"] == "game-end":
-            self.handle_game_over()
 
     def print_board(self):
         for row in self.board:
             print(','.join(map(lambda i: "_" if i == '' else i, row)))
 
-    def update_board(self, x, y):
-        self.board[x][y] = self.my_symbol
+    def update_board(self, x, y, symbol):
+        self.board[x][y] = symbol
 
+    def make_move(self, row, col):
+        result = self.check_result()
+        self.connection.send_move(row, col, result)
+        self.my_turn = False
+        if result:
+            self.active = False
+    
+    def receive_move(self, row, col):
+        self.update_board(row, col, self.other_symbol)
+        result = self.check_result()
+        if result:
+            self.active = False
+            self.my_turn = False
+        else:
+            self.my_turn = True
+        
+    def check_result(self):
+        # Return 'X', 'O', 'T', or None
+        self.winner = self.test_winning()
+        if self.winner:
+            return self.winner
+        elif self.test_tie():
+            return TIE_GAME
+        return None
+    
     def start(self):
         while self.active:
             if self.my_turn:
-                # Prompt user to enter their move
                 self.print_board()
 
-                row = get_input("Enter row (0-2): ")
-                col = get_input("Enter column (0-2): ")
+                # Prompt user to enter their move
+                while True:
+                    row = self.get_input("Enter row (0-2): ")
+                    col = self.get_input("Enter column (0-2): ")
+                    if self.is_valid_move(row, col):
+                        break
+                    print("Invalid move. Try again")
 
-                self.update_board(row, col)
-
-                # Publish move to the game topic
-                move_payload = {"type": "move",
-                                "player_id": player_id, "row": row, "col": col}
-                client.publish(game.game_topic, json.dumps(move_payload))
-                self.my_turn = False
+                self.update_board(row, col, self.my_symbol)
+                self.make_move(row, col)
             else:
                 pass
+        print("Game Over!")
+        print(self.print_board())
 
 
-print(f"Your Player ID: {player_id}, Game ID: {propose_id}")
-game_id = input("Enter Game ID:")
-game = Game(game_id, player_id)
+if __name__ == "__main__":
 
-# Subscribe to the game topic and start the MQTT loop
-client.subscribe(game.game_topic)
-client.on_message = game.on_message
-client.loop_start()
+    # MQTT broker configuration
+    broker_address = os.getenv('MQTT_BROKER')
+    if broker_address is None:
+        broker_address = "localhost"
+    print(f"Broker Address: {broker_address}")
+    broker_port = 1883
 
+    # Generate a random game ID
+    propose_id = ''.join(random.choices(
+        string.ascii_uppercase + string.digits, k=6))
 
-# Publish a game-start message to the game topic
-request_payload = {"type": "game-start", "player_id": player_id}
-client.publish(game.game_topic, json.dumps(request_payload), retain=True)
+    print(f"Suggested Game ID: {propose_id}")
+    game_id = input("Enter Game ID:")
 
+    connection = MQTTConnetion(broker_address, broker_port, game_id)
+    connection.connet()
 
-game.start()
+    while not connection.connected():
+        pass
 
-print("Game Over!")
-print(game.print_board())
+    print("Starting the game.")
+    game = Game(connection)
+    game.start()
+
+    connection.disconnect()
