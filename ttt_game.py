@@ -28,20 +28,25 @@ PLAYER_O = "O"
 TIE_GAME = "T"
 GAME_TOPIC = "tic-tac-toe/games"
 
+
 class MQTTConnetion:
+    """
+    A Class representing MQTT communication.
+    """
+
     def __init__(self, broker, port, gid):
-        self.broker_address = broker
-        self.broker_port = port
+        self.MQTT_BROKER = broker
+        self.MQTT_PORT = port
         self.game_topic = f"{GAME_TOPIC}/{gid}"
         self.player_id = ''.join(random.choices(string.digits, k=6))
         self.remote_player = None
         self.client = None
         self.receive_move = None
 
-    def connet(self):
+    def connect(self):
         # Create an MQTT client and connect to the broker
         self.client = mqtt.Client(client_id=self.player_id)
-        self.client.connect(self.broker_address, self.broker_port)
+        self.client.connect(self.MQTT_BROKER, self.MQTT_PORT)
 
         # Subscribe to the game topic and start the MQTT loop
         self.client.subscribe(self.game_topic)
@@ -51,7 +56,7 @@ class MQTTConnetion:
         # Publish a game-start message to the game topic
         request_payload = {"type": "game-start", "player_id": self.player_id}
         self.client.publish(self.game_topic, json.dumps(
-            request_payload), retain=True)
+            request_payload), qos=1, retain=True)
 
     # Define a callback function to handle incoming messages
     def on_message(self, client, userdata, message):
@@ -68,17 +73,18 @@ class MQTTConnetion:
 
     def handle_game_move(self, payload):
         # Handle incoming move from the other player
-        self.receive_move( payload['row'] , payload['col'] )
-            
+        print("received payload:", payload)
+        self.receive_move(payload['row'], payload['col'], payload['winner'])
+
     def send_move(self, row, col, winner):
         # Publish move to the game topic
         move_payload = {"type": "move",
                         "player_id": self.player_id, "row": row, "col": col,
                         "winner": winner}
-        self.client.publish(self.game_topic, json.dumps(move_payload))
+        self.client.publish(self.game_topic, json.dumps(move_payload), qos=1)
 
     def disconnect(self):
-        self.client.publish(self.game_topic, payload=None, retain=True)
+        self.client.publish(self.game_topic, payload=None, qos=1, retain=True)
         self.client.disconnect()
 
     def connected(self):
@@ -86,17 +92,25 @@ class MQTTConnetion:
 
     def get_my_symbol(self):
         return PLAYER_X if self.player_id >= self.remote_player else PLAYER_O
-    
+
     def set_receive_move(self, fn):
         self.receive_move = fn
 
 
-class Game:
+class TTTGame:
+    """
+    A class representing a Tic-Tac-Toe game.
+    """
+
     def __init__(self, connection):
+        """
+        Initializes a new Tic-Tac-Toe game.
+        """
+
         self.connection = connection
         # self.player_id = pid
         self.board = [['']*3, ['']*3, ['']*3]
-        self.winner = None
+        # self.winner = None
         self.active = True
         self.my_symbol = connection.get_my_symbol()
         self.other_symbol = PLAYER_O if self.my_symbol == PLAYER_X else PLAYER_X
@@ -140,38 +154,58 @@ class Game:
         return self.board[x][y] == ""
 
     def print_board(self):
+        """
+        Displays the current state of the Tic-Tac-Toe board.
+        """
+
         for row in self.board:
             print(','.join(map(lambda i: "_" if i == '' else i, row)))
 
     def update_board(self, x, y, symbol):
+        """
+        Update the board content
+        """
+
         self.board[x][y] = symbol
 
     def make_move(self, row, col):
-        result = self.check_result()
-        self.connection.send_move(row, col, result)
+        """
+        Sends player's move.
+        """
+        winner = self.check_result()
+        self.connection.send_move(row, col, winner)
         self.my_turn = False
-        if result:
+        if winner:
             self.active = False
-    
-    def receive_move(self, row, col):
+            self.display_result(winner)
+
+    def receive_move(self, row, col, winner):
         self.update_board(row, col, self.other_symbol)
-        result = self.check_result()
-        if result:
+        if winner:
+            self.display_result(winner)
             self.active = False
             self.my_turn = False
         else:
             self.my_turn = True
-        
+
+    def display_result(self, winner):
+        message = "It is a Tie" if winner == TIE_GAME else f"{winner} won"
+        print(f"Game Over: {message}!")
+
     def check_result(self):
         # Return 'X', 'O', 'T', or None
-        self.winner = self.test_winning()
-        if self.winner:
-            return self.winner
-        elif self.test_tie():
+        winner = self.test_winning()
+        if winner:
+            return winner
+        if self.test_tie():
             return TIE_GAME
         return None
-    
+
     def start(self):
+        """
+        Starts a game of Tic-Tac-Toe.
+        """
+
         while self.active:
             if self.my_turn:
                 self.print_board()
@@ -187,19 +221,18 @@ class Game:
                 self.update_board(row, col, self.my_symbol)
                 self.make_move(row, col)
             else:
-                pass
-        print("Game Over!")
+                time.sleep(1)
         print(self.print_board())
 
 
 if __name__ == "__main__":
 
     # MQTT broker configuration
-    broker_address = os.getenv('MQTT_BROKER')
-    if broker_address is None:
-        broker_address = "localhost"
-    print(f"Broker Address: {broker_address}")
-    broker_port = 1883
+    MQTT_BROKER = os.getenv('MQTT_BROKER')
+    if MQTT_BROKER is None:
+        MQTT_BROKER = "localhost"
+    print(f"Broker Address: {MQTT_BROKER}")
+    MQTT_PORT = 1883
 
     # Generate a random game ID
     propose_id = ''.join(random.choices(
@@ -208,14 +241,14 @@ if __name__ == "__main__":
     print(f"Suggested Game ID: {propose_id}")
     game_id = input("Enter Game ID:")
 
-    connection = MQTTConnetion(broker_address, broker_port, game_id)
-    connection.connet()
+    mqtt_conn = MQTTConnetion(MQTT_BROKER, MQTT_PORT, game_id)
+    mqtt_conn.connect()
 
-    while not connection.connected():
-        pass
+    while not mqtt_conn.connected():
+        time.sleep(1)
 
-    print("Starting the game.")
-    game = Game(connection)
+    print("Starting the game...")
+    game = TTTGame(mqtt_conn)
     game.start()
 
-    connection.disconnect()
+    mqtt_conn.disconnect()
