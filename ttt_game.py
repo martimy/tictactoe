@@ -38,7 +38,8 @@ class MQTTConnetion:
         self.MQTT_BROKER = broker
         self.MQTT_PORT = port
         self.game_topic = f"{GAME_TOPIC}/{gid}"
-        self.player_id = ''.join(random.choices(string.digits, k=6))
+        self.player_id = ''.join(random.choices(
+            string.ascii_uppercase + string.digits, k=6))
         self.remote_player = None
         self.client = None
         self.receive_move = None
@@ -73,7 +74,6 @@ class MQTTConnetion:
 
     def handle_game_move(self, payload):
         # Handle incoming move from the other player
-        print("received payload:", payload)
         self.receive_move(payload['row'], payload['col'], payload['winner'])
 
     def send_move(self, row, col, winner):
@@ -86,6 +86,7 @@ class MQTTConnetion:
     def disconnect(self):
         self.client.publish(self.game_topic, payload=None, qos=1, retain=True)
         self.client.disconnect()
+        self.client.loop_stop()
 
     def connected(self):
         return self.remote_player is not None
@@ -108,14 +109,11 @@ class TTTGame:
         """
 
         self.connection = connection
-        # self.player_id = pid
         self.board = [['']*3, ['']*3, ['']*3]
-        # self.winner = None
         self.active = True
         self.my_symbol = connection.get_my_symbol()
         self.other_symbol = PLAYER_O if self.my_symbol == PLAYER_X else PLAYER_X
         self.my_turn = self.my_symbol == PLAYER_X
-        print(f"You are '{self.my_symbol}'.")
         self.connection.set_receive_move(self.receive_move)
 
     def get_input(self, message):
@@ -172,20 +170,28 @@ class TTTGame:
         """
         Sends player's move.
         """
+        self.update_board(row, col, self.my_symbol)
         winner = self.check_result()
         self.connection.send_move(row, col, winner)
         self.my_turn = False
         if winner:
             self.active = False
             self.display_result(winner)
+        else:
+            print(f"Waiting for {self.other_symbol}'s move...")
 
     def receive_move(self, row, col, winner):
+        """
+        Receive player's move.
+
+        """
         self.update_board(row, col, self.other_symbol)
         if winner:
             self.display_result(winner)
             self.active = False
             self.my_turn = False
         else:
+            print(f"{self.other_symbol} moved to ({row},{col})")
             self.my_turn = True
 
     def display_result(self, winner):
@@ -205,7 +211,9 @@ class TTTGame:
         """
         Starts a game of Tic-Tac-Toe.
         """
-
+        
+        print("Starting the game ...")
+        print(f"You are '{self.my_symbol}'.")
         while self.active:
             if self.my_turn:
                 self.print_board()
@@ -218,11 +226,11 @@ class TTTGame:
                         break
                     print("Invalid move. Try again")
 
-                self.update_board(row, col, self.my_symbol)
                 self.make_move(row, col)
             else:
                 time.sleep(1)
-        print(self.print_board())
+        print("Final board:")
+        self.print_board()
 
 
 if __name__ == "__main__":
@@ -247,8 +255,9 @@ if __name__ == "__main__":
     while not mqtt_conn.connected():
         time.sleep(1)
 
-    print("Starting the game...")
+    # Starting the game
     game = TTTGame(mqtt_conn)
     game.start()
 
     mqtt_conn.disconnect()
+    time.sleep(1)
